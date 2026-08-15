@@ -14,11 +14,9 @@
 # 1. Librerias -------------------------------------------------
 # Se instalan solas si todavia no las tenemos instaladas.
 
-paquetes_necesarios <- c("dplyr", "readr", "knitr")
-
-for (p in paquetes_necesarios) {
-  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
-}
+install.packages("dplyr")
+install.packages("readr")
+install.packages("knitr")
 
 library(dplyr)
 library(readr)
@@ -91,7 +89,7 @@ df <- df %>% arrange(Country, Year)
 # 6. Corregir el error del "cero perdido" en thinness -------------------------------------------------
 # Revisando columna por columna nos dimos cuenta de que
 # Thinness_ten_nineteen_years y Thinness_five_nine_years tienen un
-# problema de captura: algunos valores que deberian ser de dos digitos
+# problema de recolección: algunos valores que deberian ser de dos digitos
 # (por ejemplo 20.3) quedaron guardados como si fueran de un digito
 # (2.3), como si se hubiera perdido el cero. El dataset original ya venia
 # con esta correccion aplicada en otras columnas (Adult_mortality, GDP,
@@ -228,7 +226,7 @@ table(df$GDP_per_capita_cat)
 table(df$Schooling_cat)
 table(df$Adult_mortality_cat)
 
-# Dejamos registro de donde queda cada corte (util para el informe)
+# Dejamos registro de donde queda cada corte
 for (col in c("GDP_per_capita", "Schooling", "Adult_mortality")) {
   cortes <- quantile(df[[col]], probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
   cat("\n---", col, "---\n")

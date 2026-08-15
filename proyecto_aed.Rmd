@@ -1,0 +1,321 @@
+---
+title: "Esperanza de vida y factores socioeconomicos"
+subtitle: "Entrega 0 - Analisis exploratorio y limpieza de la base de datos"
+author: "Nombre Apellido"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduccion
+
+La base de datos que vamos a trabajar es **Life Expectancy Data (Updated)**,
+disponible en Kaggle. Contiene indicadores de salud, economia y educacion
+para distintos paises entre 2000 y 2015, y la idea del proyecto es explorar
+que factores socioeconomicos y de salud estan mas asociados a la esperanza
+de vida.
+
+Antes de poder analizar nada, hay que revisar la calidad de los datos:
+ver si hay errores de captura, variables mal codificadas, datos faltantes,
+etc. Ese es el objetivo de esta primera entrega: dejar la base limpia y
+lista para el analisis posterior.
+
+# Librerias
+
+Usamos `dplyr` para la manipulacion de datos, `readr` para leer el csv y
+`knitr` para las tablas. El siguiente chunk las instala solo si no las
+tenemos instaladas todavia.
+
+```{r librerias}
+paquetes_necesarios <- c("dplyr", "readr", "knitr")
+
+for (p in paquetes_necesarios) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+}
+
+library(dplyr)
+library(readr)
+library(knitr)
+```
+
+# Carga del dataset
+
+Este documento asume que el archivo `.Rmd` esta en la raiz del proyecto y
+que el csv esta guardado en la carpeta `data/`. Si al correrlo les marca
+error de "archivo no encontrado", revisen que el working directory sea la
+carpeta del proyecto (Session > Set Working Directory > To Source File
+Location en RStudio).
+
+```{r cargar-datos}
+df <- read_csv("data/Life-Expectancy-Data-Updated.csv", show_col_types = FALSE)
+
+cat("Filas:", nrow(df), "\n")
+cat("Columnas:", ncol(df), "\n")
+```
+
+# Exploracion inicial
+
+Antes de limpiar nada, vale la pena mirar como viene la base: que tipo de
+dato tiene cada columna, si hay valores faltantes, cuantos paises y anios
+cubre, etc.
+
+```{r estructura}
+str(df)
+```
+
+```{r resumen}
+summary(df)
+```
+
+## Valores faltantes por columna
+
+```{r na-por-columna}
+na_por_columna <- colSums(is.na(df))
+na_por_columna[na_por_columna > 0]
+```
+
+No hay valores faltantes en ninguna columna, lo cual tiene sentido porque
+el dataset ya viene "curado" por quien lo subio a Kaggle. Igual eso no
+significa que los datos esten bien: mas abajo vamos a encontrar errores de
+captura que no son NAs, sino valores mal escritos.
+
+## Cobertura de paises y anios
+
+```{r cobertura}
+cat("Paises distintos:", n_distinct(df$Country), "\n")
+cat("Regiones distintas:", n_distinct(df$Region), "\n")
+cat("Rango de anios:", min(df$Year), "-", max(df$Year), "\n")
+```
+
+## Primeras filas
+
+```{r head-inicial}
+kable(head(df, 5))
+```
+
+# Limpieza y transformacion de los datos
+
+## Unificar las columnas de status economico
+
+El dataset trae el status de cada pais repartido en dos columnas dummy,
+`Economy_status_Developed` y `Economy_status_Developing` (1/0). Es
+redundante tener dos columnas para representar una sola variable
+categorica, asi que las juntamos en una sola columna `Status` con los
+valores `Developed` / `Developing`, y la ubicamos despues de `Region` para
+que quede mas ordenado.
+
+```{r unificar-status}
+df <- df %>%
+  mutate(Status = case_when(
+    Economy_status_Developed == 1 ~ "Developed",
+    Economy_status_Developing == 1 ~ "Developing",
+    TRUE ~ NA_character_
+  )) %>%
+  select(-Economy_status_Developed, -Economy_status_Developing) %>%
+  relocate(Status, .after = Region)
+
+table(df$Status, useNA = "ifany")
+```
+
+## Ordenar la base
+
+Ordenamos por pais (alfabeticamente) y despues por anio, para que quede
+mas facil de leer y para que la correccion de la siguiente seccion (que
+depende del orden) tenga sentido.
+
+```{r ordenar}
+df <- df %>% arrange(Country, Year)
+```
+
+## Corregir el error del "cero perdido" en thinness
+
+Revisando columna por columna nos dimos cuenta de que
+`Thinness_ten_nineteen_years` y `Thinness_five_nine_years` tienen un
+problema de recoleccion: algunos valores que deberian ser de dos digitos
+(por ejemplo 20.3) quedaron guardados como si fueran de un digito (2.3),
+como si se hubiera perdido el cero. El dataset original ya venia con esta
+correccion aplicada en otras columnas (Adult_mortality, GDP, Population,
+BMI), pero a estas dos columnas de thinness se les paso por alto.
+
+Para detectarlo de forma automatica, comparamos cada valor con los de su
+mismo pais en anios cercanos: si un valor es unas 10 veces mas chico que
+sus vecinos y multiplicarlo por 10 lo deja mas cerca de ellos, asumimos que
+se perdio el cero y lo corregimos. La funcion de abajo hace justamente eso,
+pais por pais.
+
+```{r funcion-cero-perdido}
+corregir_cero_perdido <- function(valores, umbral_mismo_regimen = 2.5) {
+  n <- length(valores)
+  corregido <- as.numeric(valores)
+  if (n < 2) return(corregido)
+
+  # Primero agrupamos los valores consecutivos que parecen pertenecer al
+  # mismo "regimen" (es decir, que no pegan un salto raro entre si)
+  grupo <- rep(NA_integer_, n)
+  g <- 1
+  for (i in 1:n) {
+    if (i == 1) {
+      grupo[i] <- g
+      next
+    }
+    v_prev <- corregido[i - 1]
+    v_curr <- corregido[i]
+    if (is.na(v_prev) || is.na(v_curr) || v_prev <= 0 || v_curr <= 0) {
+      g <- g + 1
+      grupo[i] <- g
+      next
+    }
+    ratio <- max(v_curr, v_prev) / min(v_curr, v_prev)
+    if (ratio <= umbral_mismo_regimen) grupo[i] <- g else { g <- g + 1; grupo[i] <- g }
+  }
+
+  # Para cada grupo, probamos si "recuperar el cero" (multiplicar la parte
+  # entera por 10) lo acerca mas al valor del grupo anterior o siguiente
+  for (g in unique(grupo)) {
+    idx <- which(grupo == g)
+    vals_seg <- corregido[idx]
+    if (any(is.na(vals_seg)) || any(vals_seg >= 10) || any(vals_seg <= 0)) next
+
+    candidatos <- floor(vals_seg) * 10 + (vals_seg - floor(vals_seg))
+
+    ref_antes   <- if (min(idx) > 1) corregido[min(idx) - 1] else NA
+    ref_despues <- if (max(idx) < n) corregido[max(idx) + 1] else NA
+
+    conecta_antes   <- !is.na(ref_antes)   && abs(candidatos[1] - ref_antes) / ref_antes < 0.3
+    conecta_despues <- !is.na(ref_despues) && abs(candidatos[length(candidatos)] - ref_despues) / ref_despues < 0.3
+
+    if (conecta_antes || conecta_despues) corregido[idx] <- candidatos
+  }
+
+  corregido
+}
+```
+
+Aplicamos la funcion pais por pais (para no mezclar datos de un pais con
+los de otro) y llevamos la cuenta de cuantos valores se corrigieron en
+cada columna.
+
+```{r aplicar-cero-perdido}
+cols_cero_perdido <- c("Thinness_ten_nineteen_years", "Thinness_five_nine_years")
+resumen_cero <- data.frame(columna = character(), corregidos = integer())
+
+for (col in cols_cero_perdido) {
+  original_col <- df[[col]]
+  df <- df %>%
+    group_by(Country) %>%
+    group_modify(function(g, key) {
+      g[[col]] <- corregir_cero_perdido(g[[col]])
+      g
+    }) %>%
+    ungroup()
+  n_corregidos <- sum(original_col != df[[col]], na.rm = TRUE)
+  resumen_cero <- rbind(resumen_cero, data.frame(columna = col, corregidos = n_corregidos))
+}
+
+df <- df %>% arrange(Country, Year)  # el group_modify puede desordenar las filas
+
+kable(resumen_cero)
+```
+
+## Correccion puntual: Eritrea 2015
+
+Al revisar la base pais por pais notamos un salto que no tiene explicacion
+logica: en Eritrea, entre 2014 y 2015, el PIB per capita y la poblacion
+cambian de forma abrupta y despues vuelven a un valor cercano al de antes
+en la siguiente medicion. No es un patron que la funcion anterior pueda
+resolver (porque es un caso puntual, no un problema sistematico de "cero
+perdido"), asi que lo corregimos a mano con el valor real reportado por el
+Banco Mundial para ese anio.
+
+```{r correccion-eritrea}
+cat("Antes de la correccion:\n")
+df %>% filter(Country == "Eritrea", Year == 2015) %>% select(GDP_per_capita, Population_mln) %>% print()
+
+df$GDP_per_capita[df$Country == "Eritrea" & df$Year == 2015] <- 901.1
+df$Population_mln[df$Country == "Eritrea" & df$Year == 2015] <- 3.5
+
+cat("\nDespues de la correccion:\n")
+df %>% filter(Country == "Eritrea", Year == 2015) %>% select(GDP_per_capita, Population_mln) %>% print()
+```
+
+## Variables cualitativas nuevas (terciles)
+
+El proyecto pide trabajar con variables cualitativas, y la base solo trae
+tres de forma nativa: `Country`, `Region` y el `Status` que armamos antes.
+Para llegar a las 6 que necesitamos, convertimos tres variables numericas
+relevantes en categorias de **Bajo / Medio / Alto** usando terciles (cada
+categoria se queda con un tercio de los paises-anio). Elegimos
+`GDP_per_capita`, `Schooling` y `Adult_mortality` porque son variables
+clave para el analisis y tiene sentido interpretarlas en niveles.
+
+Las agregamos como columnas nuevas con sufijo `_cat`, sin borrar las
+columnas numericas originales, porque las vamos a seguir necesitando para
+otros analisis.
+
+```{r funcion-terciles}
+cualificar_terciles <- function(x) {
+  cortes <- quantile(x, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+  cut(x, breaks = cortes, labels = c("Bajo", "Medio", "Alto"), include.lowest = TRUE)
+}
+```
+
+```{r aplicar-terciles}
+df <- df %>%
+  mutate(
+    GDP_per_capita_cat  = cualificar_terciles(GDP_per_capita),
+    Schooling_cat       = cualificar_terciles(Schooling),
+    Adult_mortality_cat = cualificar_terciles(Adult_mortality)
+  ) %>%
+  relocate(GDP_per_capita_cat, .after = GDP_per_capita) %>%
+  relocate(Schooling_cat, .after = Schooling) %>%
+  relocate(Adult_mortality_cat, .after = Adult_mortality)
+```
+
+```{r terciles-distribucion}
+table(df$GDP_per_capita_cat)
+table(df$Schooling_cat)
+table(df$Adult_mortality_cat)
+```
+
+Dejamos registro de donde queda cada corte:
+
+```{r terciles-rangos}
+for (col in c("GDP_per_capita", "Schooling", "Adult_mortality")) {
+  cortes <- quantile(df[[col]], probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+  cat("\n---", col, "---\n")
+  cat(sprintf("Bajo:  [%.2f - %.2f]\n", cortes[1], cortes[2]))
+  cat(sprintf("Medio: (%.2f - %.2f]\n", cortes[2], cortes[3]))
+  cat(sprintf("Alto:  (%.2f - %.2f]\n", cortes[3], cortes[4]))
+}
+```
+
+# Verificacion final
+
+Con esto ya tenemos las 6 variables cualitativas que pide el proyecto
+(`Country`, `Region`, `Status`, `GDP_per_capita_cat`, `Schooling_cat`,
+`Adult_mortality_cat`), los errores de captura corregidos, y la base
+ordenada.
+
+```{r verificacion-final}
+cat("Filas:", nrow(df), "\n")
+cat("Columnas:", ncol(df), "\n")
+
+kable(head(df, 5))
+```
+
+# Exportar la base limpia
+
+Guardamos la version limpia en la carpeta `data/` para usarla directamente
+en la siguiente entrega, sin tener que correr toda la limpieza de nuevo.
+
+```{r exportar}
+write_csv(df, "data/Life-Expectancy-Data-Clean.csv")
+```
